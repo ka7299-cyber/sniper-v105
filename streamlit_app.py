@@ -5,18 +5,25 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
 # 頁面基本設定
-st.set_page_config(page_title="Sniper X V105", layout="wide")
+st.set_page_config(page_title="Sniper X V106", layout="wide")
 
-# ==========================================
-# 1. 核心參數庫 (移植自 V75)
-# ==========================================
-# 大師策略：[短期MA, 長期MA]
-MASTER_STRATEGY = {
-    '2330': [17, 72], '2317': [18, 62], '2454': [29, 65],
-    '2303': [21, 55], '2382': [23, 70], '3231': [26, 60]
-}
+# 移植大師參數
+MASTER_PARAMS = {'2330': 17, '2317': 18, '2303': 21, '2454': 29, '2603': 35}
 
-def get_full_data(sid):
+st.title("🚀 Sniper X 戰情室 V106")
+
+# --- 側邊欄控制 ---
+st.sidebar.header("控制面板")
+stock_id = st.sidebar.text_input("輸入股票代號", value="2330").upper().strip()
+
+range_options = {"3個月": 60, "半年": 120, "1年": 240}
+selected_range = st.sidebar.selectbox("顯示時間區間", list(range_options.keys()), index=1)
+days_to_show = range_options[selected_range]
+
+# 讓使用者在手機橫屏時可調大高度
+chart_height = st.sidebar.slider("調整圖表高度", 300, 800, 500, 50)
+
+def get_data_with_fallback(sid):
     ticker_tw = f"{sid}.TW"
     df = yf.download(ticker_tw, period="2y", progress=False)
     if df.empty:
@@ -25,75 +32,76 @@ def get_full_data(sid):
         return df, ticker_two
     return df, ticker_tw
 
-# ==========================================
-# 2. 型態偵測邏輯 (簡化移植)
-# ==========================================
-def detect_pattern(df):
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    # 簡單範例：紅三兵、吞噬等
-    if last['Close'] > last['Open'] and prev['Close'] > prev['Open'] and last['Close'] > prev['Close']:
-        return "☀️ 多頭排列 (連漲)"
-    if last['Close'] > prev['Open'] and last['Open'] < prev['Close'] and last['Close'] > prev['Close']:
-        return "⚡ 多頭吞噬"
-    return "⚖️ 區間震盪"
-
-# ==========================================
-# 3. 主介面開發
-# ==========================================
-st.title("🚀 Sniper X 全能戰情室 V105")
-stock_id = st.sidebar.text_input("輸入股票代號", value="2330").upper().strip()
-chart_height = st.sidebar.slider("圖表高度", 400, 1000, 550)
-
 if stock_id:
-    df, final_ticker = get_full_data(stock_id)
-    if not df.empty:
-        if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
+    with st.spinner('數據計算中...'):
+        df, final_ticker = get_data_with_fallback(stock_id)
         
-        # --- 計算均線 ---
-        short_p, long_p = MASTER_STRATEGY.get(stock_id, [20, 60]) # 若無大師參數則用 AI 20/60
-        df['Short_MA'] = df['Close'].rolling(window=short_p).mean()
-        df['Long_MA'] = df['Close'].rolling(window=long_p).mean()
-        
-        # --- 戰情報告區 ---
-        pattern = detect_pattern(df)
-        last_p = float(df['Close'].iloc[-1])
-        
-        tab1, tab2, tab3 = st.tabs(["📈 技術分析", "📊 籌碼數據", "🧠 型態判讀"])
-        
-        with tab1:
-            # 建立子圖：上方 K 線，下方成交量
+        if not df.empty:
+            if isinstance(df.columns, pd.MultiIndex):
+                df.columns = df.columns.get_level_values(0)
+                
+            # 計算均線
+            ma_days = MASTER_PARAMS.get(stock_id, 20)
+            df['MA'] = df['Close'].rolling(window=ma_days).mean()
+            
+            # 準備繪圖數據
+            plot_df = df.tail(days_to_show).copy()
+            
+            # --- 核心：建立上下分離子圖 ---
+            # row_width 設定比例：[0.3, 0.7] 表示下方佔30%，上方佔70%
             fig = make_subplots(rows=2, cols=1, shared_xaxes=True, 
-                               vertical_spacing=0.05, row_heights=[0.7, 0.3])
+                                vertical_spacing=0.05, 
+                                row_width=[0.3, 0.7])
+
+            # 1. 上方圖層：收盤價
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df['Close'], name='收盤價',
+                line=dict(color='#1f77b4', width=2),
+                hovertemplate='價格: %{y:.1f}'
+            ), row=1, col=1)
             
-            # 收盤價線
-            fig.add_trace(go.Scatter(x=df.index, y=df['Close'], name='收盤價', line=dict(color='#1f77b4', width=2)), row=1, col=1)
-            # 短期均線
-            fig.add_trace(go.Scatter(x=df.index, y=df['Short_MA'], name=f'短期({short_p}MA)', line=dict(color='#ff7f0e', dash='dash')), row=1, col=1)
-            # 長期均線
-            fig.add_trace(go.Scatter(x=df.index, y=df['Long_MA'], name=f'長期({long_p}MA)', line=dict(color='#2ca02c')), row=1, col=1)
+            # 2. 上方圖層：大師均線
+            fig.add_trace(go.Scatter(
+                x=plot_df.index, y=plot_df['MA'], name=f'{ma_days}MA',
+                line=dict(color='#ff7f0e', width=2, dash='dash'),
+                hovertemplate='均線: %{y:.1f}'
+            ), row=1, col=1)
+
+            # 3. 下方圖層：成交量 (使用長條圖)
+            # 根據漲跌自動著色 (漲紅跌綠)
+            colors = ['#ef5350' if c >= o else '#26a69a' 
+                      for c, o in zip(plot_df['Close'], plot_df['Open'])]
             
-            # 成交量柱狀圖
-            colors = ['red' if df['Close'].iloc[i] >= df['Open'].iloc[i] else 'green' for i in range(len(df))]
-            fig.add_trace(go.Bar(x=df.index, y=df['Volume'], name='成交量', marker_color=colors, opacity=0.7), row=2, col=1)
-            
-            fig.update_layout(height=chart_height, template="plotly_white", hovermode="x unified",
-                              margin=dict(l=10, r=10, t=20, b=10), dragmode=False)
-            fig.update_xaxes(fixedrange=True, nticks=8)
-            fig.update_yaxes(fixedrange=True, side="right")
+            fig.add_trace(go.Bar(
+                x=plot_df.index, y=plot_df['Volume'], name='成交量',
+                marker_color=colors, opacity=0.8,
+                hovertemplate='量: %{y:,.0f}'
+            ), row=2, col=1)
+
+            # 圖表佈局優化
+            fig.update_layout(
+                title=f"{stock_id} ({final_ticker}) 戰情分析",
+                template="plotly_white",
+                height=chart_height,
+                margin=dict(l=5, r=5, t=50, b=5),
+                hovermode="x unified",
+                dragmode=False,
+                showlegend=False # 手機空間有限，隱藏圖例
+            )
+
+            # 座標軸設定
+            fig.update_yaxes(title_text="價格", side="right", row=1, col=1, fixedrange=True)
+            fig.update_yaxes(title_text="量", side="right", row=2, col=1, fixedrange=True)
+            fig.update_xaxes(fixedrange=True, nticks=6)
+
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-
-        with tab2:
-            st.subheader("三大法人與信用交易 (估算)")
-            # 這裡可以整合 yf.Ticker(final_ticker).info 的籌碼數據
-            st.info("⚠️ 網頁版籌碼數據由 Yahoo Finance 延遲提供，詳細券商分點建議參考 V75 電腦版。")
+            
+            # 下方顯示數值摘要 (Metric)
+            last_p = plot_df['Close'].iloc[-1]
+            last_ma = plot_df['MA'].iloc[-1]
             c1, c2 = st.columns(2)
-            c1.metric("機構持股比", f"{yf.Ticker(final_ticker).info.get('heldPercentInstitutions', 0)*100:.1f}%")
-            c2.metric("空單佔比 (Short Ratio)", f"{yf.Ticker(final_ticker).info.get('shortPercentOfFloat', 0)*100:.2f}%")
+            c1.metric("現價", f"{last_p:.1f}")
+            c2.metric(f"{ma_days}MA", f"{last_ma:.1f}", f"{last_p - last_ma:+.1f}")
 
-        with tab3:
-            st.header(f"型態偵測結果：{pattern}")
-            st.write(f"目前股價 {last_p} 相對於短期均線之乖離率：{((last_p - df['Short_MA'].iloc[-1])/df['Short_MA'].iloc[-1]*100):.2f}%")
-
-    else:
-        st.error("查無資料")
+        else:
+            st.error("查無代號資料")
